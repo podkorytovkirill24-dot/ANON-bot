@@ -308,10 +308,15 @@ def get_config(context: ContextTypes.DEFAULT_TYPE) -> Config:
     return context.application.bot_data["config"]
 
 
-def choose_dispatch_admin(config: Config, preferred_admin_id: Optional[int] = None) -> int:
-    if preferred_admin_id is not None and config.is_admin(preferred_admin_id):
-        return preferred_admin_id
-    return config.primary_admin_id
+def get_dispatch_candidates(config: Config, preferred_admin_id: Optional[int] = None) -> tuple[int, ...]:
+    if preferred_admin_id is None or not config.is_admin(preferred_admin_id):
+        return config.admin_chat_ids
+
+    ordered = [preferred_admin_id]
+    for admin_id in config.admin_chat_ids:
+        if admin_id != preferred_admin_id:
+            ordered.append(admin_id)
+    return tuple(ordered)
 
 
 def detect_content_type(message: Message) -> str:
@@ -375,7 +380,7 @@ def build_channel_card(text: str, payload_limit: int) -> str:
     if not trimmed:
         return header
 
-    return f"{header}\n\n<pre>{escape(trimmed)}</pre>"
+    return f"{header}\n\n<b>{escape(trimmed)}</b>"
 
 
 def build_control_text(submission: sqlite3.Row) -> str:
@@ -452,39 +457,49 @@ async def dispatch_next_submission(
 ) -> None:
     store = get_store(context)
     config = get_config(context)
-    dispatch_admin_id = choose_dispatch_admin(config, preferred_admin_id)
+    candidates = get_dispatch_candidates(config, preferred_admin_id)
 
-    submission = store.claim_next_submission_for_admin(dispatch_admin_id)
-    if submission is None:
+    for dispatch_admin_id in candidates:
+        submission = store.claim_next_submission_for_admin(dispatch_admin_id)
+        if submission is None:
+            return
+
+        preview_message_id: Optional[int] = None
+        try:
+            preview = await context.bot.copy_message(
+                chat_id=dispatch_admin_id,
+                from_chat_id=submission["user_chat_id"],
+                message_id=submission["user_message_id"],
+            )
+            preview_message_id = preview.message_id
+        except TelegramError:
+            logger.exception(
+                "Failed to copy submission #%s preview to admin %s",
+                submission["id"],
+                dispatch_admin_id,
+            )
+
+        try:
+            control_message = await context.bot.send_message(
+                chat_id=dispatch_admin_id,
+                text=build_control_text(submission),
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=preview_message_id,
+                reply_markup=build_keyboard(submission["id"]),
+            )
+        except TelegramError:
+            logger.exception(
+                "Failed to send moderation card for submission #%s to admin %s",
+                submission["id"],
+                dispatch_admin_id,
+            )
+            store.release_claim(submission["id"])
+            continue
+
+        updated = store.set_admin_message(submission["id"], dispatch_admin_id, control_message.message_id)
+        if not updated:
+            logger.warning("Lost claim while setting admin message for submission #%s", submission["id"])
         return
-
-    preview_message_id: Optional[int] = None
-    try:
-        preview = await context.bot.copy_message(
-            chat_id=dispatch_admin_id,
-            from_chat_id=submission["user_chat_id"],
-            message_id=submission["user_message_id"],
-        )
-        preview_message_id = preview.message_id
-    except TelegramError:
-        logger.exception("Failed to copy submission #%s preview to admin chat", submission["id"])
-
-    try:
-        control_message = await context.bot.send_message(
-            chat_id=dispatch_admin_id,
-            text=build_control_text(submission),
-            parse_mode=ParseMode.HTML,
-            reply_to_message_id=preview_message_id,
-            reply_markup=build_keyboard(submission["id"]),
-        )
-    except TelegramError:
-        logger.exception("Failed to send moderation card for submission #%s", submission["id"])
-        store.release_claim(submission["id"])
-        return
-
-    updated = store.set_admin_message(submission["id"], dispatch_admin_id, control_message.message_id)
-    if not updated:
-        logger.warning("Lost claim while setting admin message for submission #%s", submission["id"])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
