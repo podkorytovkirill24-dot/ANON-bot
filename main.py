@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8399287010:AAFUiE8EFg5oeMcCZ5houAkn9eJFlPaUy18"
-ADMIN_CHAT_IDS = (7576665621)
+ADMIN_CHAT_IDS = "7576665621"
 CHANNEL_ID = "-1002403512349"
 CHANNEL_NAME = "Лицей"
 DB_PATH = "queue.db"
